@@ -1,1 +1,38 @@
-*.txt
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Testing and coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.cache/
+
+# IDE/editor
+.vscode/
+.idea/
+.DS_Store
+
+# Local data artifacts
+*.sqlite
+*.db
+capture.bin
+*.log
+
+# Legacy rule retained; allow secrets.txt explicitly
+secrets.txt
