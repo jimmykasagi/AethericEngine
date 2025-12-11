@@ -38,7 +38,6 @@ def cmd_capture(args: argparse.Namespace) -> int:
         db_path=Path(args.db),
         capture_path=Path(args.capture),
         min_messages=args.min_messages,
-        read_size=args.read_size,
         timeout=args.timeout,
         max_payload=args.max_payload,
     )
@@ -83,7 +82,6 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--db", default="ae.sqlite", help="SQLite output file")
     cap.add_argument("--capture", default="capture.bin", help="Raw capture output file")
     cap.add_argument("--min-messages", type=int, default=600, help="Stop after this many parsed messages")
-    cap.add_argument("--read-size", type=int, default=4096, help="Socket read size")
     cap.add_argument("--timeout", type=float, default=10.0, help="Socket timeout seconds")
     cap.add_argument("--max-payload", type=int, default=None, help="Max payload bytes to keep per message; default stores all")
     cap.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")

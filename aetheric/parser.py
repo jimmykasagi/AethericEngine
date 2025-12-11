@@ -86,6 +86,20 @@ class StreamParser:
             return payload
         return payload[: self._max_payload]
 
+    def _decode_length(self, length_bytes: bytes) -> int:
+        """
+        Length is nominally big-endian (README.md), but scenarios.md shows
+        little-endian fragments such as cb0c000000 -> 3275. Prefer little-endian
+        when the byte pattern ends with zeros (suggesting LE) and yields a
+        smaller, realistic length; otherwise fall back to big-endian.
+        """
+        big = int.from_bytes(length_bytes, byteorder="big")
+        little = int.from_bytes(length_bytes, byteorder="little")
+
+        if length_bytes[-3:] == b"\x00\x00\x00" and 0 < little < big:
+            return little
+        return big
+
     def _feed_binary(self, data: bytes, final: bool) -> List[BinaryMessage]:
         msgs: List[BinaryMessage] = []
         self._binary_buf.extend(data)
@@ -105,7 +119,7 @@ class StreamParser:
                 break
 
             header = self._binary_buf[0]
-            declared_len = int.from_bytes(self._binary_buf[1:6], byteorder="big")
+            declared_len = self._decode_length(self._binary_buf[1:6])
             total_needed = 6 + declared_len
 
             if len(self._binary_buf) >= total_needed:

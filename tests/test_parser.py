@@ -20,6 +20,18 @@ class StreamParserTests(unittest.TestCase):
         ascii_msgs, _ = parser.feed(b"$ABCDE;$FGHIJ;")
         self.assertEqual([m.payload for m in ascii_msgs], ["ABCDE", "FGHIJ"])
 
+    def test_ascii_fragmented_across_messages(self) -> None:
+        parser = StreamParser()
+        # First chunk has start marker but no terminator, mimicking scenarios.md broken ASCII.
+        ascii_msgs, _ = parser.feed(b"$STARTING-BUT")
+        self.assertEqual(ascii_msgs, [])
+
+        ascii_msgs, _ = parser.feed(b"-NO-END-YET")
+        self.assertEqual(ascii_msgs, [])
+
+        ascii_msgs, _ = parser.feed(b"-FINALLY;")
+        self.assertEqual([m.payload for m in ascii_msgs], ["STARTING-BUT-NO-END-YET-FINALLY"])
+
     def test_binary_complete(self) -> None:
         parser = StreamParser()
         payload = b"abc"
@@ -53,6 +65,29 @@ class StreamParserTests(unittest.TestCase):
         _, msgs_final = parser.feed(b"", final=True)
         self.assertEqual(len(msgs_final), 1)
         self.assertTrue(msgs_final[0].truncated)
+
+    def test_binary_fragmented_little_endian_length(self) -> None:
+        parser = StreamParser()
+        payload = bytes(range(256)) * 12 + b"tail"
+        declared_len = len(payload)
+        length_le = declared_len.to_bytes(5, "little")
+        # Spread across four fragments similar to scenarios.md example.
+        chunk1 = bytes([BINARY_HEADERS[0]]) + length_le + payload[:1000]
+        chunk2 = payload[1000:2000]
+        chunk3 = payload[2000:3000]
+        chunk4 = payload[3000:]
+
+        collected = []
+        for chunk in (chunk1, chunk2, chunk3, chunk4):
+            _, msgs = parser.feed(chunk)
+            collected.extend(msgs)
+
+        self.assertEqual(len(collected), 1)
+        msg = collected[0]
+        self.assertEqual(msg.declared_len, declared_len)
+        self.assertEqual(msg.received_len, declared_len)
+        self.assertFalse(msg.truncated)
+        self.assertEqual(msg.payload, payload)
 
 
 if __name__ == "__main__":

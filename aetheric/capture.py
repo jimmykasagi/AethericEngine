@@ -40,7 +40,6 @@ def capture_stream(
     db_path: Path,
     capture_path: Path,
     min_messages: int = 600,
-    read_size: int = 4096,
     timeout: float = 10.0,
     max_payload: int | None = None,
 ) -> Tuple[int, int]:
@@ -54,13 +53,27 @@ def capture_stream(
     binary_count = 0
     draining = False
 
+    def _log_messages(ascii_msgs, binary_msgs) -> None:
+        for msg in ascii_msgs:
+            LOG.info("ASCII message: %s", msg.payload)
+        for msg in binary_msgs:
+            LOG.info(
+                "Binary message header=%#04x declared=%s received=%s truncated=%s hex=%s",
+                msg.header,
+                msg.declared_len,
+                msg.received_len,
+                msg.truncated,
+                msg.payload.hex(),
+            )
+
     with socket.create_connection((host, port), timeout=timeout) as sock, open(capture_path, "wb") as capture_file, SQLiteStorage(db_path) as storage:
         sock.settimeout(timeout)
         _send_auth(sock, jwt)
 
         while True:
             try:
-                chunk = sock.recv(read_size)
+                # No caller-configurable read_size: ask for a large chunk to pull whole message bursts when available.
+                chunk = sock.recv(65535)
             except socket.timeout:
                 LOG.warning("Socket read timed out; stopping capture")
                 break
@@ -72,6 +85,7 @@ def capture_stream(
             capture_file.write(chunk)
 
             ascii_msgs, binary_msgs = parser.feed(chunk)
+            _log_messages(ascii_msgs, binary_msgs)
             ascii_count += storage.save_ascii(ascii_msgs)
             binary_count += storage.save_binary(binary_msgs)
 
@@ -82,6 +96,7 @@ def capture_stream(
 
         # Flush any truncated binary payload if the stream cut mid-frame.
         ascii_msgs, binary_msgs = parser.flush()
+        _log_messages(ascii_msgs, binary_msgs)
         ascii_count += storage.save_ascii(ascii_msgs)
         binary_count += storage.save_binary(binary_msgs)
 
