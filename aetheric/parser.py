@@ -10,7 +10,7 @@ Protocol refs:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Tuple
 
 
 ASCII_START = ord("$")
@@ -36,48 +36,103 @@ class StreamParser:
     """
     Incrementally parses mixed ASCII and binary AE frames from a byte stream.
 
-    Two independent buffers are used because ASCII and binary frames can interleave.
+    A single rolling buffer is processed in-order so bytes consumed by a binary
+    frame are not reconsidered as ASCII (prevents double-counting when binary
+    payloads contain '$' or ';').
     """
 
     def __init__(self, max_payload: int | None = None) -> None:
         self._ascii_active = False
         self._ascii_buf = bytearray()
-        self._binary_buf = bytearray()
+        self._buf = bytearray()
         self._max_payload = max_payload
 
     def feed(self, data: bytes, *, final: bool = False) -> Tuple[List[AsciiMessage], List[BinaryMessage]]:
-        ascii_msgs = self._feed_ascii(data)
-        binary_msgs = self._feed_binary(data, final=final)
-        return ascii_msgs, binary_msgs
+        self._buf.extend(data)
+        ascii_msgs: List[AsciiMessage] = []
+        binary_msgs: List[BinaryMessage] = []
 
-    def _feed_ascii(self, data: Sequence[int]) -> List[AsciiMessage]:
-        msgs: List[AsciiMessage] = []
-        for b in data:
+        while True:
+            if self._ascii_active:
+                if not self._buf:
+                    break
+                b = self._buf.pop(0)
+                if b == ASCII_START:
+                    # Restart on nested start marker; keep latest start.
+                    self._ascii_buf.clear()
+                    continue
+                if b == ASCII_END:
+                    if len(self._ascii_buf) >= 5:
+                        payload = self._ascii_buf.decode("ascii", errors="ignore")
+                        ascii_msgs.append(AsciiMessage(payload=payload))
+                    self._ascii_active = False
+                    self._ascii_buf.clear()
+                    continue
+                if 32 <= b <= 126:
+                    self._ascii_buf.append(b)
+                continue
+
+            if not self._buf:
+                break
+
+            b = self._buf[0]
             if b == ASCII_START:
                 self._ascii_active = True
                 self._ascii_buf.clear()
+                self._buf.pop(0)
                 continue
 
-            if not self._ascii_active:
+            if b in BINARY_HEADERS:
+                if len(self._buf) < 6:
+                    # Need more length bytes.
+                    if final:
+                        # Incomplete header at EOF is discarded.
+                        self._buf.clear()
+                    break
+
+                header = b
+                declared_len = self._decode_length(bytes(self._buf[1:6]))
+                total_needed = 6 + declared_len
+
+                if declared_len <= 0 or declared_len > len(self._buf) - 6:
+                    # Not enough bytes to satisfy this length; most likely a false header.
+                    self._buf.pop(0)
+                    continue
+
+                if len(self._buf) < total_needed:
+                    if final:
+                        payload = bytes(self._buf[6:])
+                        payload = self._trim_excess(payload)
+                        binary_msgs.append(
+                            BinaryMessage(
+                                header=header,
+                                payload=payload,
+                                declared_len=declared_len,
+                                received_len=len(payload),
+                                truncated=True,
+                            )
+                        )
+                        self._buf.clear()
+                    break
+
+                payload = bytes(self._buf[6:total_needed])
+                payload = self._trim_excess(payload)
+                binary_msgs.append(
+                    BinaryMessage(
+                        header=header,
+                        payload=payload,
+                        declared_len=declared_len,
+                        received_len=len(payload),
+                        truncated=False,
+                    )
+                )
+                del self._buf[:total_needed]
                 continue
 
-            if b == ASCII_START:
-                # Restart on nested start marker; keep earliest start per PLAN.md.
-                self._ascii_buf.clear()
-                continue
+            # Drop non-header/non-ASCII-start byte.
+            self._buf.pop(0)
 
-            if b == ASCII_END:
-                if len(self._ascii_buf) >= 5:
-                    payload = self._ascii_buf.decode("ascii", errors="ignore")
-                    msgs.append(AsciiMessage(payload=payload))
-                self._ascii_active = False
-                self._ascii_buf.clear()
-                continue
-
-            # Keep printable ASCII only; ignore delimiters per README.md guidance.
-            if 32 <= b <= 126:
-                self._ascii_buf.append(b)
-        return msgs
+        return ascii_msgs, binary_msgs
 
     def _trim_excess(self, payload: bytes) -> bytes:
         if self._max_payload is None:
@@ -88,77 +143,11 @@ class StreamParser:
 
     def _decode_length(self, length_bytes: bytes) -> int:
         """
-        Length is nominally big-endian (README.md), but scenarios.md shows
-        little-endian fragments such as cb0c000000 -> 3275. Prefer little-endian
-        when the byte pattern ends with zeros (suggesting LE) and yields a
-        smaller, realistic length; otherwise fall back to big-endian.
+        AE binary frames in this capture use little-endian 5-byte lengths
+        (see scenarios.md guidance). Using big-endian here would create
+        enormous lengths that swallow subsequent frames.
         """
-        big = int.from_bytes(length_bytes, byteorder="big")
-        little = int.from_bytes(length_bytes, byteorder="little")
-
-        if length_bytes[-3:] == b"\x00\x00\x00" and 0 < little < big:
-            return little
-        return big
-
-    def _feed_binary(self, data: bytes, final: bool) -> List[BinaryMessage]:
-        msgs: List[BinaryMessage] = []
-        self._binary_buf.extend(data)
-
-        while True:
-            start_idx = self._find_header()
-            if start_idx is None:
-                # No header found; keep buffer small to avoid unbounded growth.
-                if len(self._binary_buf) > 1024:
-                    self._binary_buf.clear()
-                break
-
-            if start_idx:
-                del self._binary_buf[:start_idx]
-
-            if len(self._binary_buf) < 6:
-                break
-
-            header = self._binary_buf[0]
-            declared_len = self._decode_length(self._binary_buf[1:6])
-            total_needed = 6 + declared_len
-
-            if len(self._binary_buf) >= total_needed:
-                payload = bytes(self._binary_buf[6:total_needed])
-                payload = self._trim_excess(payload)
-                msgs.append(
-                    BinaryMessage(
-                        header=header,
-                        payload=payload,
-                        declared_len=declared_len,
-                        received_len=len(payload),
-                        truncated=False,
-                    )
-                )
-                del self._binary_buf[:total_needed]
-                continue
-
-            if final:
-                payload = bytes(self._binary_buf[6:])
-                payload = self._trim_excess(payload)
-                msgs.append(
-                    BinaryMessage(
-                        header=header,
-                        payload=payload,
-                        declared_len=declared_len,
-                        received_len=len(payload),
-                        truncated=True,
-                    )
-                )
-                self._binary_buf.clear()
-            break
-
-        return msgs
-
-    def _find_header(self) -> int | None:
-        for idx, b in enumerate(self._binary_buf):
-            if b in BINARY_HEADERS:
-                return idx
-        return None
+        return int.from_bytes(length_bytes, byteorder="little")
 
     def flush(self) -> Tuple[List[AsciiMessage], List[BinaryMessage]]:
         """
